@@ -1,0 +1,290 @@
+% Following script fits per-subject level GLMs and runs second-level analyses
+% through one-sample t-tests. Any questions, or if you find a bug:
+% a.ozsu@ucl.ac.uk
+
+clear
+clc
+close all
+
+wanted = {'RT','ACC','Motion','Sync','Speed','Direction'};
+
+% RT : Continuous
+% ACC : Categorical: 1 or 0
+% Motion Type: Categorical 1 for Biological 0 for Scrambled
+% Temporal Synchrony: Categorical 1 for Synchronous 0 for Asynchronous
+% Speed: Categorical: Three levels
+% Direction: Categorical: Two levels
+
+%% Import the data and remove missed trials
+
+nSubjects = 41;
+addpath('results\')
+perSubjResults = cell(1, nSubjects);
+
+
+%% Preallocate the betas
+beta_MotionType = nan(nSubjects, 2);
+beta_TemporalSynchrony    = nan(nSubjects, 2);
+beta_Interaction    = nan(nSubjects, 2);
+%beta_Speed          = nan(nSubjects, 2);
+%beta_Direction      = nan(nSubjects, 2);
+
+for iSubj = 1:nSubjects
+    data = load(fullfile('D:\BioMotion\EXP 1','results',[num2str(iSubj) '.mat']));
+    subjResults = [];
+    for iBlock = 1:length(data.block)
+    blockData = data.block{1, iBlock};
+    blockResults = [];
+    for iField = 1:numel(wanted)
+        dat = blockData.(wanted{iField});
+        if iscell(dat), dat = cell2mat(dat); end
+        blockResults(iField,:) = dat(:)';   % (:)' guards against column-vector fields
+    end
+    subjResults = [subjResults, blockResults];
+    end
+    
+    subjResults = subjResults';
+    T = array2table(subjResults,VariableNames={'RT', 'ACC', 'MotionType', 'TemporalSynchrony', 'Speed', 'Direction'});
+
+    % Remove missed trials
+    T(T.ACC == 99, :) = [];
+
+    perSubjResults{1, iSubj} = T;
+
+    %% Fit GLM for reaction time
+    try
+        mdl_lin = fitglm(T, ...
+            'RT ~ MotionType + TemporalSynchrony + MotionType:TemporalSynchrony');
+    catch ME
+        warning('Subject %s GLM failed: %s', iSubj, ME.message)
+        continue
+    end
+
+    coef_lin = mdl_lin.Coefficients;
+    getB = @(name) coef_lin.Estimate(strcmp(coef_lin.Row, name));
+    beta_MotionType(iSubj, 1) = getB('MotionType');
+    beta_TemporalSynchrony(iSubj, 1)    = getB('TemporalSynchrony');
+    beta_Interaction(iSubj, 1)    = getB('MotionType:TemporalSynchrony');
+    %beta_Speed(iSubj, 1)          = getB('Speed');
+    %beta_Direction(iSubj, 1)      = getB('Direction');
+
+    %% Fit GLM for accuracy with logit link
+
+    try
+        mdlLog = fitglm(T, ...
+            'ACC ~ MotionType + TemporalSynchrony + MotionType:TemporalSynchrony', ...
+            'Distribution','binomial', 'Link','logit', 'LikelihoodPenalty','jeffreys-prior');
+    catch ME
+        warning('Subject %s GLM failed: %s', iSubj, ME.message)
+        continue
+    end
+
+    disp(mdlLog.Coefficients)
+    
+    coef_log = mdlLog.Coefficients;
+    getB = @(name) coef_log.Estimate(strcmp(coef_log.Row, name));
+    beta_MotionType(iSubj, 2) = getB('MotionType');
+    beta_TemporalSynchrony(iSubj, 2)    = getB('TemporalSynchrony');
+    beta_Interaction(iSubj, 2)    = getB('MotionType:TemporalSynchrony');
+    %beta_Speed(iSubj, 2)          = getB('Speed');
+    %beta_Direction(iSubj, 2)      = getB('Direction');
+
+end
+    
+%% Second-level analyses - one-sample t-test - RT
+
+valid = ~isnan(beta_Interaction(:,1));% & ~isoutlier(beta_Interaction(:,1));
+nValid = sum(valid);
+fprintf('\n========== GROUP (N = %d) ==========\n', nValid)
+
+%% Coefficient inference - RT
+fprintf('\n=== One-sample t-tests on coefficients ===\n')
+test_coefs = {beta_MotionType(valid, 1),    'Motion Type';
+              beta_TemporalSynchrony(valid, 1),    'Temporal Synchrony';
+              beta_Interaction(valid,1), 'Motion Type x Temporal Synchrony'};
+              %beta_Speed(valid,1),     'Speed';
+              %beta_Direction(valid,1),     'Direction'};
+
+for iT = 1:size(test_coefs,1)
+    vals = test_coefs{iT,1};
+    [~, p, ~, s] = ttest(vals);
+    fprintf('%-25s mean=%6.3f  t(%d)=%6.3f  p=%.4f\n', ...
+        test_coefs{iT,2}, mean(vals), nValid-1, s.tstat, p)
+end
+
+%% 1. Coefficient bar plot - RT
+figure('Color','w','Position',[100 100 1200 400])
+for iB = 1:size(test_coefs,1)
+    vals = test_coefs{iB,1};
+    [~, p] = ttest(vals);
+    mu  = mean(vals);
+    sem = std(vals) / sqrt(nValid);
+    col = [0.2 0.6 0.9];
+
+    subplot(1, size(test_coefs,1), iB); hold on
+    scatter(ones(1,nValid), vals, 100, 'k', 'filled', 'MarkerFaceAlpha', 0.4)
+    errorbar(1, mu, sem, 'o', 'Color', col, 'MarkerFaceColor', col, ...
+        'LineWidth', 4, 'MarkerSize', 10, 'CapSize', 10)
+    if p < 0.001
+        pStr = 'p < .001';
+    else
+        pStr = sprintf('p = %.3f', p);
+    end
+    yl = ylim;
+    text(1, yl(2) - 0.06*range(yl), pStr, 'HorizontalAlignment','center', ...
+         'FontSize', 20, 'FontWeight','bold')
+    yline(0, 'k--')
+    xlim([0.5 1.5]); xticks([])
+    %ylim([-0.5, 0.5])
+    title(test_coefs{iB, 2}, 'FontSize', 20)
+    box off
+    ax = gca; ax.FontSize = 20; ax.FontWeight = 'bold';
+end
+sgtitle(sprintf('Subject-level coefficients - Reaction Time'), 'FontWeight','bold', 'FontSize', 20)
+ax = gca; ax.FontSize = 20; ax.FontWeight = 'bold';
+
+%% Second-level analyses - one-sample t-test - Accuracy
+
+valid = ~isnan(beta_Interaction(:,2)); %& ~isoutlier(beta_Interaction(:,2));
+nValid = sum(valid);
+fprintf('\n========== GROUP (N = %d) ==========\n', nValid)
+
+%% Coefficient inference - Accuracy
+fprintf('\n=== One-sample t-tests on coefficients ===\n')
+test_coefs = {beta_MotionType(valid, 2),    'Motion Type';
+              beta_TemporalSynchrony(valid, 2),    'Temporal Synchrony';
+              beta_Interaction(valid,2), 'Motion Type x Temporal Synchrony'};
+              %beta_Speed(valid,2),     'Speed';
+              %beta_Direction(valid,2),     'Direction'};
+
+for iT = 1:size(test_coefs,1)
+    vals = test_coefs{iT,1};
+    [~, p, ~, s] = ttest(vals);
+    fprintf('%-25s mean=%6.3f  t(%d)=%6.3f  p=%.4f\n', ...
+        test_coefs{iT,2}, mean(vals), nValid-1, s.tstat, p)
+end
+
+%% 1. Coefficient bar plot - Accuracy
+figure('Color','w','Position',[100 100 1200 400])
+for iB = 1:size(test_coefs,1)
+    vals = test_coefs{iB,1};
+    [~, p] = ttest(vals);
+    mu  = mean(vals);
+    sem = std(vals) / sqrt(nValid);
+    col = [0.2 0.6 0.9];
+
+    subplot(1, size(test_coefs,1), iB); hold on
+    scatter(ones(1,nValid), vals, 100, 'k', 'filled', 'MarkerFaceAlpha', 0.4)
+    errorbar(1, mu, sem, 'o', 'Color', col, 'MarkerFaceColor', col, ...
+        'LineWidth', 4, 'MarkerSize', 10, 'CapSize', 10)
+    if p < 0.001
+        pStr = 'p < .001';
+    else
+        pStr = sprintf('p = %.3f', p);
+    end
+    yl = ylim;
+    text(1, yl(2) - 0.06*range(yl), pStr, 'HorizontalAlignment','center', ...
+         'FontSize', 20, 'FontWeight','bold')
+    yline(0, 'k--')
+    xlim([0.5 1.5]); xticks([])
+    %ylim([-0.5, 0.5])
+    title(test_coefs{iB, 2}, 'FontSize', 20)
+    box off
+    ax = gca; ax.FontSize = 20; ax.FontWeight = 'bold';
+end
+sgtitle(sprintf('Subject-level coefficients - Accuracy'), 'FontWeight','bold', 'FontSize', 20)
+ax = gca; ax.FontSize = 20; ax.FontWeight = 'bold';
+
+
+%% ---------------- SECOND-STAGE DIAGNOSTICS ---------------------------
+% Check if non-parametric and parametric agrees
+fprintf('\n================ SECOND-STAGE DIAGNOSTICS ================\n');
+
+betaSets = {beta_MotionType,        'Motion Type';
+            beta_TemporalSynchrony, 'Temporal Synchrony';
+            beta_Interaction,       'Motion x Sync'};
+outcomeName = {'RT','Accuracy'};
+
+figure('Color','w','Position',[100 100 1150 680])
+plotIdx = 1;
+for oc = 1:2
+    fprintf('\n--- %s ---\n', outcomeName{oc});
+    fprintf('%-22s %8s %9s %9s %11s %8s\n', ...
+        'Coefficient','skew','LillieP','tP','signrankP','agree?');
+    for b = 1:size(betaSets,1)
+        v = betaSets{b,1}(:,oc);
+        v = v(~isnan(v));
+        sk = skewness(v);
+        if numel(v) > 4, [~, pL] = lillietest(v); else, pL = NaN; end
+        [~, pT] = ttest(v);
+        pW = signrank(v);                       
+        agree = (pT<0.05) == (pW<0.05);
+        fprintf('%-22s %8.3f %9.3f %9.4f %11.4f %8s\n', ...
+            betaSets{b,2}, sk, pL, pT, pW, string(agree));
+
+        subplot(2,3,plotIdx); plotIdx = plotIdx+1;
+        qqplot(v);
+        title(sprintf('%s — %s', outcomeName{oc}, betaSets{b,2}));
+        set(gca,'FontSize',10); box off
+    end
+end
+
+%% Post-hoc figures
+motionTypeRT = nan(2, nSubjects);
+motiontypeAcc = nan(2, nSubjects);
+temporalSyncRT = nan(2, nSubjects);
+
+for iSubj = 1:nSubjects
+    subjResults = perSubjResults{1, iSubj};
+    subjResults = table2array(subjResults);
+    motionTypeRT(1, iSubj) = mean(subjResults(subjResults(:,3) == 0, 1)); %Scrambled
+    motionTypeRT(2, iSubj)  = mean(subjResults(subjResults(:,3) == 1, 1)); %Biological
+    motiontypeAcc(1, iSubj) = mean(subjResults(subjResults(:,3) == 0, 2)); %Scrambled
+    motiontypeAcc(2, iSubj)  = mean(subjResults(subjResults(:,3) == 1, 2)); %Biological
+    temporalSyncRT(1, iSubj) = mean(subjResults(subjResults(:,4) == 0, 1)); %Asynchronous
+    temporalSyncRT(2, iSubj) = mean(subjResults(subjResults(:,4) == 1, 1)); %Synchronous
+end
+
+%% Main effect of motion type on RT
+
+plotMainEffect(motionTypeRT(2,:),  motionTypeRT(1,:), 'Biological', 'Scrambled', 'Main effect of Motion Type on RT', ...
+    nSubjects)
+
+%% Main effect of motion type on Accuracy
+
+plotMainEffect(motiontypeAcc(2,:), motiontypeAcc(1,:), 'Biological', 'Scrambled', 'Main effect of Motion Type on Accuracy', ...
+    nSubjects)
+%% Main effect of temporal synchrony on RT
+
+plotMainEffect(temporalSyncRT(2,:), temporalSyncRT(1,:), 'Synchronous', 'Asynchronous', 'Main effect of Temporal Synchrony on RT', ...
+    nSubjects)
+
+
+
+function plotMainEffect(d1, d2, ax1, ax2, title_text, nSubjects)
+
+rtBio = d1;   % Biological
+rtScrambled  = d2;    % Scrambled
+
+m2  = [mean(rtBio,'omitnan'),  mean(rtScrambled,'omitnan')];
+se2 = [std(rtBio,'omitnan')/sqrt(sum(~isnan(rtBio))), ...
+       std(rtScrambled,'omitnan')/sqrt(sum(~isnan(rtScrambled)))];
+
+jit  = 0.08*(rand(1,nSubjects)-0.5);
+
+figure;
+b = bar(m2,'FaceColor','flat','FaceAlpha',0.6); hold on
+b.CData(1,:) = [0.25 0.55 0.40];
+b.CData(2,:) = [0.60 0.30 0.55];
+
+plot([1+jit; 2+jit], [rtBio; rtScrambled], '-', 'Color',[0.6 0.6 0.6 0.4]);
+scatter(1+jit, rtBio, 100,'k','filled','MarkerFaceAlpha',0.35);
+scatter(2+jit, rtScrambled,  100,'k','filled','MarkerFaceAlpha',0.35);
+
+errorbar(1:2, m2, se2, 'k','linestyle','none','LineWidth',4, "CapSize", 20);
+set(gca,'XTick',1:2,'XTickLabel',{ax1,ax2});
+box off
+title(title_text)
+ax = gca; ax.FontSize = 20; ax.FontWeight = 'bold';
+
+end
